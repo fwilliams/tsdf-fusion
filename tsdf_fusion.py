@@ -105,31 +105,35 @@ _cupy_integrate_kernel = cp.RawKernel(_cupy_integrate_kernel_src, 'integrate')
 
 
 class TSDVVolumeBase(ABC):
-    def __init__(self, vol_bounds, voxel_size, truncation_voxel_distance=5.0):
+    def __init__(self, voxel_grid_shape, volume_origin, voxel_size, truncation_voxel_distance=5.0):
         """
         Base class for a voxel grid used to accumulate a Truncated Signed Distance Field (TSDF) from
         depth maps.
-        :param vol_bounds: A 3x2 shaped array indicating the min/max ranges in voxels of the volume along each axis.
-                           i.e. [[min_x, max_x], [min_y, max_y], [min_z, max_z]] specify the integer min and max
-                                voxel indices along the x, y, and, z axes respectively.
+
+        :param voxel_grid_shape: The shape of the voxel grid used to store the computed TSDF.
+        :param volume_origin: The (world space) origin of the TSDF volume. The center of the [0, 0, 0] voxel will
+                              correspond to this point, and each voxel [i, j, k] corresponds to
+                              volume_origin + [i, j, k] * voxel_size
         :param voxel_size: A floating point number indicating the size of a voxel along an axis (all voxels are cubes)
         :param truncation_voxel_distance: The truncation distance (in voxels) for the TSDF.
         """
-        vol_bounds = np.asarray(vol_bounds)
-        assert vol_bounds.shape == (3, 2), "[!] `vol_bnds` should be of shape (3, 2)."
 
-        # Define voxel volume parameters
-        self._vol_bnds = vol_bounds
+        self._vol_dim = np.asarray(voxel_grid_shape).copy(order='C').astype(np.int32)    # Copy for CUDA
+        self._vol_origin = np.asarray(volume_origin).copy(order='C').astype(np.float32)  # Copy for CUDA
         self._voxel_size = float(voxel_size)
         self._trunc_margin = truncation_voxel_distance * self._voxel_size  # truncation on SDF
+
+        if self._vol_dim.shape != (3,):
+            raise ValueError("Invalid voxel_grid_shape must be an array with shape (3,)")
+
+        if self._vol_origin.shape != (3,):
+            raise ValueError("Invalid volume_origin must be an array with shape (3,)")
+
+        self._vol_bnds = np.array([
+            [volume_origin[i] + voxel_grid_shape[i] * voxel_size] for i in range(3)
+        ]).astype(np.float32)
+
         self._color_const = 256 * 256
-
-        # Adjust volume bounds and ensure C-order contiguous
-        self._vol_dim = np.ceil((self._vol_bnds[:, 1] - self._vol_bnds[:, 0]) / self._voxel_size).copy(
-            order='C').astype(int)
-        self._vol_bnds[:, 1] = self._vol_bnds[:, 0] + self._vol_dim * self._voxel_size
-        self._vol_origin = self._vol_bnds[:, 0].copy(order='C').astype(np.float32)
-
         self._color_const = 256 ** 2
 
     @property
@@ -242,20 +246,21 @@ class TSDVVolumeBase(ABC):
 
 
 class TSDFVolumeCPU(TSDVVolumeBase):
-    def __init__(self, vol_bounds, voxel_size, truncation_voxel_distance=5.0):
+    def __init__(self, voxel_grid_shape, volume_origin, voxel_size, truncation_voxel_distance=5.0):
         """
         A voxel grid stored on the CPU used to accumulate a Truncated Signed Distance Field (TSDF) from
         depth maps.
 
         See TSDFVolumeGPU for a GPU version of this class.
 
-        :param vol_bounds: A 3x2 shaped array indicating the min/max ranges in voxels of the volume along each axis.
-                           i.e. [[min_x, max_x], [min_y, max_y], [min_z, max_z]] specify the integer min and max
-                                voxel indices along the x, y, and, z axes respectively.
+        :param voxel_grid_shape: The shape of the voxel grid used to store the computed TSDF.
+        :param volume_origin: The (world space) origin of the TSDF volume. The center of the [0, 0, 0] voxel will
+                              correspond to this point, and each voxel [i, j, k] corresponds to
+                              volume_origin + [i, j, k] * voxel_size
         :param voxel_size: A floating point number indicating the size of a voxel along an axis (all voxels are cubes)
         :param truncation_voxel_distance: The truncation distance (in voxels) for the TSDF.
         """
-        super().__init__(vol_bounds, voxel_size, truncation_voxel_distance)
+        super().__init__(voxel_grid_shape, volume_origin, voxel_size, truncation_voxel_distance)
 
         # Initialize pointers to voxel volume in CPU memory
         self._tsdf_vol_cpu = np.full(self._vol_dim, np.inf).astype(np.float32)
@@ -400,20 +405,21 @@ class TSDFVolumeCPU(TSDVVolumeBase):
 
 
 class TSDFVolumeGPU(TSDVVolumeBase):
-    def __init__(self, vol_bounds, voxel_size, truncation_voxel_distance=5.0):
+    def __init__(self, voxel_grid_shape, volume_origin, voxel_size, truncation_voxel_distance=5.0):
         """
         A voxel grid stored on the GPU used to accumulate a Truncated Signed Distance Field (TSDF) from
         depth maps.
 
         See TSDFVolumeCPU for a CPU version of this class.
 
-        :param vol_bounds: A 3x2 shaped array indicating the min/max ranges in voxels of the volume along each axis.
-                           i.e. [[min_x, max_x], [min_y, max_y], [min_z, max_z]] specify the integer min and max
-                                voxel indices along the x, y, and, z axes respectively.
+        :param voxel_grid_shape: The shape of the voxel grid used to store the computed TSDF.
+        :param volume_origin: The (world space) origin of the TSDF volume. The center of the [0, 0, 0] voxel will
+                              correspond to this point, and each voxel [i, j, k] corresponds to
+                              volume_origin + [i, j, k] * voxel_size
         :param voxel_size: A floating point number indicating the size of a voxel along an axis (all voxels are cubes)
         :param truncation_voxel_distance: The truncation distance (in voxels) for the TSDF.
         """
-        super().__init__(vol_bounds, voxel_size, truncation_voxel_distance)
+        super().__init__(voxel_grid_shape, volume_origin, voxel_size, truncation_voxel_distance)
 
         self._tsdf_vol_gpu = cp.full(self._vol_dim, np.inf, dtype=cp.float32)
         self._weight_vol_gpu = cp.zeros(self._vol_dim, dtype=cp.float32)
