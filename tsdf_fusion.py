@@ -449,7 +449,7 @@ class TSDFVolumeGPU(TSDVVolumeBase):
         :param obs_weight: The scalar weight to assign for the current observation.
         :return: None
         """
-        im_w, im_h = depth_im.shape
+        im_h, im_w = depth_im.shape
 
         # Fold RGB color image into a single channel image
         color_im = color_im.astype(np.float32)
